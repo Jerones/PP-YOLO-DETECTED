@@ -1,0 +1,19 @@
+# 运行本程序所需的最小依赖
+# 已验证组合：Windows 10/11 + Python 3.8.19（见 README 第 1 节）
+# 安装：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 推理后端。必须 2022.3：2023 起把 openvino.runtime 并入了 openvino，直接升级会报 ImportError
+openvino==2022.3.0
+
+# 只用到图像处理函数（imdecode / cvtColor / resize / polylines），不需要 highgui。
+# 装 headless 版可以避免 OpenCV 自带的 Qt 插件与 PyQt5 冲突；
+# 若机器上已有 opencv-python 也能跑，但两个包不要同时安装。
+opencv-python-headless==5.0.0.93
+
+PyQt5==5.15.10
+numpy==1.24.4
+pandas==2.0.3
+matplotlib==3.7.2
+
+# 仅在打包 exe 时需要
+pyinstaller==6.16.0

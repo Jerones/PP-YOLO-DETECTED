@@ -1,0 +1,14 @@
+# 统一换行符，避免 Windows / macOS 协作者提交时整文件 diff
+* text=auto
+
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.csv   text eol=lf
+*.ipynb text eol=lf
+*.bat   text eol=crlf
+
+*.png binary
+*.jpg binary
+*.pdmodel binary
+*.pdiparams binary
