@@ -28,6 +28,10 @@ DEFAULT_RATIO = 0.10
 DEFAULT_VALUE = 6.0
 DEFAULT_CONSECUTIVE = 3
 
+# 上次使用的摄像头序号：外接摄像头通常排在 1 号，记住选择就不用每次重选
+DEFAULT_CAMERA_INDEX = 0
+CAMERA_INDEX_RANGE = (0, 15)
+
 # 收件邮箱默认值来自本机 mail_config.py；没配置时为空，由界面提示填写
 MAX_MAIL_TO = 5
 
@@ -95,6 +99,7 @@ class AppSettings:
         self._alarm_value = DEFAULT_VALUE
         self._alarm_consecutive = DEFAULT_CONSECUTIVE
         self._mail_to = DEFAULT_MAIL_TO
+        self._camera_index = DEFAULT_CAMERA_INDEX
         self.load()
 
     # ---------------- 字段 ----------------
@@ -168,6 +173,22 @@ class AppSettings:
             return valid
         return [DEFAULT_MAIL_TO] if DEFAULT_MAIL_TO else []
 
+    # ---------------- 摄像头 ----------------
+
+    @property
+    def camera_index(self):
+        """上次使用的摄像头序号，下次启动直接用它，不必重新选。"""
+        return self._camera_index
+
+    @camera_index.setter
+    def camera_index(self, value):
+        low, high = CAMERA_INDEX_RANGE
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = low
+        self._camera_index = max(low, min(high, number))
+
     # ---------------- 阈值 ----------------
 
     def threshold_for(self, meter_range):
@@ -208,6 +229,7 @@ class AppSettings:
             'alarm_value': round(self._alarm_value, 4),
             'alarm_consecutive': self._alarm_consecutive,
             'mail_to': self._mail_to,
+            'camera_index': self._camera_index,
         }
 
     def load(self):
@@ -236,6 +258,7 @@ class AppSettings:
         self.alarm_consecutive = data.get('alarm_consecutive',
                                           self._alarm_consecutive)
         self.mail_to = data.get('mail_to', self._mail_to)
+        self.camera_index = data.get('camera_index', self._camera_index)
 
     def save(self):
         """原子写：先写临时文件再替换，避免断电留下半截 JSON。"""

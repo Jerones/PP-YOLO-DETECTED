@@ -241,6 +241,27 @@ QPushButton#boardAction {
     padding: 0 14px;
     text-align: center;
 }
+
+/* ---------- 左栏摄像头选择 ---------- */
+/* 与 8.5pt 的分节标题同排，高度压到 26，避免撑高整列按钮；
+   padding-right 给自绘的下拉箭头让位（见 detect_ui.CameraCombo） */
+#combo_camera {
+    min-height: 26px;
+    max-height: 26px;
+    font-size: 9pt;
+    padding-left: 6px;
+    padding-right: 20px;
+    border-radius: 6px;
+}
+#combo_camera::drop-down {
+    width: 18px;
+    border: none;
+}
+#combo_camera:disabled {
+    color: #AFB9C7;
+    background-color: #F8FAFC;
+    border-color: #EAEEF4;
+}
 """
 
 

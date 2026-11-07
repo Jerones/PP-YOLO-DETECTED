@@ -69,6 +69,33 @@ def reset_icon(latched):
     return _load_icon('icon_reset', color=ICON_ALERT if latched else ICON_NORMAL)
 
 
+class CameraCombo(QtWidgets.QComboBox):
+    """摄像头选择下拉框，自己画下拉箭头。
+
+    两件事逼着自绘：QSS 给 ::drop-down 设了 border:none 之后 Qt 不再画箭头，
+    而 QSS 的 image: url(...) 在「中文 + 空格」的资源路径下并不可靠。
+    自己画还能顺手让箭头与按钮图标同一套线宽和颜色。
+    """
+
+    def paintEvent(self, event):
+        super(CameraCombo, self).paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        color = QtGui.QColor(ICON_NORMAL if self.isEnabled() else ICON_DISABLED)
+        pen = QtGui.QPen(color, 1.6)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        painter.setPen(pen)
+        cx = self.width() - 12.0
+        cy = self.height() / 2.0
+        path = QtGui.QPainterPath()
+        path.moveTo(cx - 3.8, cy - 2.0)
+        path.lineTo(cx, cy + 1.8)
+        path.lineTo(cx + 3.8, cy - 2.0)
+        painter.drawPath(path)
+        painter.end()
+
+
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         MainWindow.setObjectName("MainWindow")
@@ -149,8 +176,24 @@ class Ui_MainWindow(object):
         layout.addWidget(self.pushButton_img2)
 
         layout.addSpacing(4)
+        # 摄像头序号与分节标题同排：左栏在最小窗口下只剩二十几像素余量，
+        # 单开一行会把下面的按钮压扁，合到标题行只多占一行标题的高度
+        camera_row = QtWidgets.QHBoxLayout()
+        camera_row.setContentsMargins(0, 0, 0, 0)
+        camera_row.setSpacing(6)
         self.label_section_camera = self._section_label("摄像头")
-        layout.addWidget(self.label_section_camera)
+        camera_row.addWidget(self.label_section_camera)
+        self.combo_camera = CameraCombo(self.leftPanel)
+        self.combo_camera.setObjectName("combo_camera")
+        self.combo_camera.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.combo_camera.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_camera.setMinimumWidth(96)
+        self.combo_camera.setMaxVisibleItems(10)
+        self.combo_camera.setToolTip(
+            "选择使用哪个摄像头。接上外接摄像头后，点下拉框最后一项可重新扫描设备；"
+            "摄像头已打开时切换会立即改用新设备")
+        camera_row.addWidget(self.combo_camera, 1)
+        layout.addLayout(camera_row)
         self.pushButton_video = self._make_button("pushButton_video")
         layout.addWidget(self.pushButton_video)
         self.pushButton_video_countinue = self._make_button(

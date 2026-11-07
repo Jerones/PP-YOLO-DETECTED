@@ -24,7 +24,8 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from alarm import AlarmCenter
-from camera import DetectWorker, FrameGrabber, ReadingSmoother, draw_overlay
+from camera import (CameraScanner, DetectWorker, FrameGrabber, ReadingSmoother,
+                    draw_overlay)
 from detect_ui import Ui_MainWindow, reset_icon
 from paths import data_dir
 from recorder import ReadingRecorder
@@ -99,7 +100,14 @@ class UI_Logic_Window(QMainWindow):
         self._info_img_path = None     # 信息栏当前展示的图片来源
         self._last_dir = ''            # 上次打开/保存的目录
 
-        self.grabber = FrameGrabber(0, self)
+        # 上次用的摄像头序号，记在 settings.json 里，外接摄像头不用每次重选
+        self._camera_index = self.settings.camera_index
+        self._cameras = {}             # 已确认可用的序号 -> (宽, 高)
+        self._scan_hits = {}           # 本轮扫描的临时结果，边扫边填
+        self._scan = None              # 摄像头扫描线程
+        self._rescan_pending = False    # 扫描途中又被要求重扫
+
+        self.grabber = FrameGrabber(self._camera_index, self)
         self.grabber.opened.connect(self._on_camera_opened)
         self.grabber.failed.connect(self._on_camera_failed)
         self.worker = None             # 推理线程，按需创建
@@ -129,6 +137,7 @@ class UI_Logic_Window(QMainWindow):
         self.ui.label.installEventFilter(self)
 
         self.init_slots()
+        self._rebuild_camera_combo()
         self.show_initial_image()
         self.ui.textBrowser.setHtml(
             '<div style="color:#7C8899;font-size:10pt;padding-top:4px;">请选择左侧操作</div>'
@@ -142,6 +151,7 @@ class UI_Logic_Window(QMainWindow):
     def init_slots(self):
         self.ui.pushButton_img.clicked.connect(self.button_image_open)
         self.ui.pushButton_img2.clicked.connect(self.detect_img)
+        self.ui.combo_camera.currentIndexChanged.connect(self._on_camera_selected)
         self.ui.pushButton_video.clicked.connect(self.button_camera_open)
         self.ui.pushButton_video_countinue.clicked.connect(self.countinue)
         self.ui.pushButton_video_stop.clicked.connect(self.stop)
@@ -403,17 +413,174 @@ class UI_Logic_Window(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "提示", "保存失败：{}".format(exc))
 
+    # ---------------- 摄像头选择 ----------------
+
+    def start_camera_scan(self):
+        """后台扫描可用摄像头，扫到一个就填一个到下拉框。
+
+        逐个 open 设备要零点几秒到两秒，同步跑会把界面卡住，所以放线程里。
+        窗口显示之后再调用，不拖慢启动。
+        """
+        if self._scan is not None and self._scan.isRunning():
+            # 上一轮还在收尾：记个标记，等它结束再扫一遍，不并发占设备
+            self._rescan_pending = True
+            return
+        # 正在采集的序号不真去 open，否则会把它自己挤掉，误报设备被占用
+        skip = [self.grabber.index] if (self._camera_ready or self.grabber.running) else []
+        self._rescan_pending = False
+        # 这里不清 _cameras：扫描期间列表保持原样，扫完再整体替换，
+        # 否则下拉框会先缩成一项再慢慢长回来
+        self._scan_hits = {}
+        self._scan = CameraScanner(skip=skip, parent=self)
+        self._scan.found.connect(self._on_camera_found)
+        # 把扫描器本身一起传进去：信号是排队投递的，等它到达时 _scan 可能
+        # 已经换成下一轮的对象，用当时那个才判断得准「是不是被中止的」
+        scanner = self._scan
+        scanner.scanned.connect(
+            lambda count, src=scanner: self._on_camera_scanned(count, src))
+        scanner.start()
+
+    def _cancel_camera_scan(self):
+        """中止扫描：要开摄像头时先让路，避免扫描占着设备造成打开失败。"""
+        if self._scan is not None and self._scan.isRunning():
+            self._scan.cancel()
+
+    def _on_camera_found(self, index, width, height):
+        self._scan_hits[index] = (width, height)
+        self._rebuild_camera_combo()
+
+    def _on_camera_scanned(self, count, scanner=None):
+        """扫描结束：把结果转正，必要时把记忆的序号修正到实际存在的设备上。"""
+        scanner = scanner if scanner is not None else self._scan
+        cancelled = scanner is not None and scanner.cancelled
+        if cancelled:
+            # 被中止的扫描只探了一部分，不能拿它整体覆盖，否则会把没探到的
+            # 摄像头当成被拔掉了
+            merged = dict(self._cameras)
+            merged.update(self._scan_hits)
+            self._cameras = merged
+        else:
+            self._cameras = dict(self._scan_hits)
+        self._scan_hits = {}
+        if self._rescan_pending:
+            self._rescan_pending = False
+            self.start_camera_scan()
+            return
+        if cancelled:
+            self._rebuild_camera_combo()
+            return
+        # 记忆的摄像头被拔掉时，自动退到序号最小的那个，否则下次点开会直接报错
+        if (count > 0 and not self._camera_ready and not self.grabber.running
+                and self._camera_index not in self._cameras):
+            first = min(self._cameras)
+            self._set_camera_index(first)
+            self.statusBar().showMessage(
+                "上次使用的摄像头未找到，已切换到摄像头 {}".format(first + 1))
+            return
+        self._rebuild_camera_combo()
+        if count == 0:
+            self.statusBar().showMessage("未检测到可用摄像头，请检查设备是否已连接")
+        elif count > 1:
+            self.statusBar().showMessage(
+                "检测到 {} 个摄像头，可在左栏切换".format(count))
+
+    def _camera_choices(self):
+        """下拉框要显示的内容：已确认结果 + 本轮扫描进度。
+
+        记忆的序号即使还没被扫到也先占一行，避免扫描过程中选中项来回跳。
+        """
+        merged = dict(self._cameras)
+        merged.update(self._scan_hits)
+        if self._camera_index not in merged:
+            merged[self._camera_index] = (0, 0)
+        return merged
+
+    def _rebuild_camera_combo(self):
+        """按当前设备列表重建下拉框，保留当前选中项。"""
+        combo = self.ui.combo_camera
+        combo.blockSignals(True)
+        combo.clear()
+        for index in sorted(self._camera_choices()):
+            # 文案只放序号：下拉框只有 140px 宽，加上自绘箭头后放不下「使用中」。
+            # 当前用的是哪个本来就由「选中项」表达，状态栏也会写全
+            combo.addItem('摄像头 {}'.format(index + 1), index)
+            width, height = self._camera_choices()[index]
+            tip = '设备序号 {}'.format(index)
+            if width and height:
+                # 这是设备自己的默认画幅（程序会再请求 1280×720），
+                # 用来区分「内置 640×480」和「外接 1920×1080」这类设备
+                tip += ' · 设备默认画幅 {}×{}'.format(width, height)
+            if index == self.grabber.index and (self._camera_ready or self.grabber.running):
+                tip += '\n当前正在使用这个设备'
+            tip += '\n画面不是你要看的那块表时，换一个序号试试'
+            combo.setItemData(combo.count() - 1, tip, QtCore.Qt.ToolTipRole)
+        if combo.count():
+            combo.insertSeparator(combo.count())
+        combo.addItem('重新扫描设备', -1)
+        combo.setItemData(combo.count() - 1,
+                          '接上外接摄像头后点这里重新扫描', QtCore.Qt.ToolTipRole)
+        pos = combo.findData(self._camera_index)
+        combo.setCurrentIndex(pos if pos >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _on_camera_selected(self, pos):
+        data = self.ui.combo_camera.itemData(pos)
+        if data is None:
+            return
+        index = int(data)
+        if index < 0:
+            # 选的是「重新扫描设备」：先把选中项复原，再重扫
+            self._rebuild_camera_combo()
+            self._cancel_camera_scan()
+            self.start_camera_scan()
+            self.statusBar().showMessage("正在重新扫描摄像头…")
+            return
+        if index == self._camera_index:
+            return
+        self._set_camera_index(index)
+
+    def _set_camera_index(self, index, remember=True):
+        """记住用户选择的摄像头；设备已打开时立即换过去。"""
+        self._camera_index = index
+        if remember:
+            self.settings.camera_index = index
+            self.settings.save()
+        self._rebuild_camera_combo()
+        if not (self._camera_ready or self.grabber.running):
+            self.statusBar().showMessage("已选择摄像头 {}".format(index + 1))
+            return
+        self._switch_camera(index)
+
+    def _switch_camera(self, index):
+        """已打开设备时换摄像头：检测状态保持原样，只重开设备。"""
+        mode = 'detect' if self.is_detecting else 'preview'
+        self.is_detecting = False
+        if self.worker is not None:
+            self.worker.stop_detect()
+        self._pending_mode = mode
+        self._camera_ready = False
+        # 旧设备上的检测框不能画到新画面的坐标上，先清空
+        self._latest_meters = []
+        self._sync_buttons()
+        self.statusBar().showMessage(
+            "正在切换到摄像头 {}…（约 3 秒）".format(index + 1))
+        self.grabber.switch_to(index)
+
     # ---------------- 摄像头 ----------------
 
     def button_camera_open(self):
         if self.grabber.running and self._camera_ready:
             return
+        # 扫描线程可能正占着设备，先让它停手再开，避免「设备被占用」的假失败
+        self._cancel_camera_scan()
         # 打开设备要 3~4 秒，这里只发请求，界面立刻返回，结果走 opened 信号
         self._pending_mode = 'preview'
         self._camera_ready = False
         self._sync_buttons()
         self.statusBar().showMessage("正在打开摄像头…（首次约 3 秒）")
-        self.grabber.start_capture()
+        # 用 switch_to 而不是 start_capture：未运行时它等价于打开，
+        # 同时把「当前选的序号」同步给采集线程
+        self.grabber.switch_to(self._camera_index)
 
     def _on_camera_opened(self, width, height):
         """采集线程真正打开设备后回调：启动预览，并处理用户的待办请求。"""
@@ -424,6 +591,7 @@ class UI_Logic_Window(QMainWindow):
         self.alarm.clear_counts()
         self._latest_meters = []
         self._info_img_path = None     # 摄像头模式下信息栏不再显示图片路径
+        self._rebuild_camera_combo()   # 「使用中」标记跟着设备走
         if not self.preview_timer.isActive():
             self.preview_timer.start(PREVIEW_INTERVAL_MS)
         mode = getattr(self, '_pending_mode', None)
@@ -437,13 +605,15 @@ class UI_Logic_Window(QMainWindow):
                           '当前画面为 {}×{}，非 16:9，已自动补边处理</div>'.format(
                               width, height))
         self.ui.textBrowser.setHtml(
-            '<div style="color:#3C4A5F;font-size:10pt;">摄像头已打开（{}×{}），'
+            '<div style="color:#3C4A5F;font-size:10pt;">摄像头 {} 已打开（{}×{}），'
             '当前为预览模式</div>'
             '<div style="color:#7C8899;font-size:9pt;padding-top:8px;">'
-            '点击“摄像头检测”开始实时读数</div>{}'.format(width, height, ratio_hint))
+            '点击“摄像头检测”开始实时读数</div>{}'.format(
+                self._camera_index + 1, width, height, ratio_hint))
         self._sync_buttons()
         self.statusBar().showMessage(
-            "摄像头已打开 {}×{}（预览中）".format(width, height))
+            "摄像头 {} 已打开 {}×{}（预览中）".format(
+                self._camera_index + 1, width, height))
 
     def countinue(self):
         if self.is_detecting:
@@ -453,8 +623,9 @@ class UI_Logic_Window(QMainWindow):
             self._pending_mode = 'detect'
             self._sync_buttons()
             self.statusBar().showMessage("正在打开摄像头…（首次约 3 秒）")
+            self._cancel_camera_scan()
             if not self.grabber.running:
-                self.grabber.start_capture()
+                self.grabber.switch_to(self._camera_index)
             return
         self._start_detection()
 
@@ -490,6 +661,7 @@ class UI_Logic_Window(QMainWindow):
         self.grabber.stop_capture()
         self._latest_meters = []
         self.smoother.reset()
+        self._rebuild_camera_combo()
         self.ui.textBrowser.clear()
         self.show_initial_image()
         self._sync_buttons()
@@ -548,6 +720,7 @@ class UI_Logic_Window(QMainWindow):
             self.worker.stop_detect(wait=True)
         self.preview_timer.stop()
         self.show_initial_image()
+        self._rebuild_camera_combo()
         self._sync_buttons()
         QMessageBox.warning(self, "摄像头", message)
         self.statusBar().showMessage("摄像头未就绪")
@@ -670,6 +843,10 @@ class UI_Logic_Window(QMainWindow):
             self._img_task.wait(3000)
         if self._loader is not None and self._loader.isRunning():
             self._loader.wait(3000)
+        # 扫描线程可能正握着设备，不喊停的话它会在进程退出时才释放
+        if self._scan is not None and self._scan.isRunning():
+            self._scan.cancel()
+            self._scan.wait(3000)
         self.grabber.stop_capture()
         super(UI_Logic_Window, self).closeEvent(event)
 
@@ -692,6 +869,8 @@ def main():
     # 先让窗口出来，模型随后在后台加载：用户点开就有反应，
     # 而不是对着白屏等 openvino + 模型编译的两三秒
     window.start_model_loading()
+    # 摄像头列表同样在后台扫，用户真去点「摄像头打开」时列表通常已经就绪
+    window.start_camera_scan()
     return app.exec_()
 
 
