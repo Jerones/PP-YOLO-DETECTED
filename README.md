@@ -1,10 +1,25 @@
 # 基于 PP-YOLO 的工业表计读数检测系统
 
-用摄像头或相机照片自动读出工业指针式压力表的数值。检测用 **PPYOLOv2** 定位表盘，
-分割用 **DeepLabV3P** 提取指针与刻度，再按极坐标展开 + 刻度游程定位做几何换算，
-最后线性插值得到读数。整个推理基于 **OpenVINO**，CPU 即可运行，不需要独立显卡。
+> 用摄像头或相机照片自动读出工业指针式压力表的数值，CPU 即可运行，无需独立显卡。
+
+**技术路线**：`PPYOLOv2`（表盘检测）→ `DeepLabV3P`（指针 / 刻度分割）→ 极坐标展开 +
+刻度游程定位（几何换算）→ 线性插值（读数），全程基于 `OpenVINO` 推理加速。
 
 ![主界面](docs/screenshots/main.png)
+
+**技术栈**：Python 3.8 · PyQt5 · OpenVINO 2022.3 · OpenCV · Pandas · Matplotlib
+
+---
+
+## 目录
+
+- [功能](#功能)
+- [快速开始](#快速开始) — 环境 → 依赖 → 补两样东西 → 运行
+- [使用说明](#使用说明) — 图片 / 摄像头 / 多摄像头 / 告警 / 数据分析
+- [打包成 exe](#打包成-exe)
+- [配置文件](#配置文件)
+- [换成自己的模型](#换成自己的模型)
+- [常见问题](#常见问题)
 
 ## 功能
 
@@ -89,35 +104,50 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ### 3. 你需要自己补充的两样东西
 
-仓库**刻意不包含**下面两项，拿到代码后必须自己补上，否则程序跑不起来：
+> **这一步不做，程序跑不起来。** 仓库刻意不包含下面两项。
 
 | 必须 | 文件 | 为什么不在仓库里 | 怎么补 |
 |---|---|---|---|
-| ✅ | `model/` 模型权重 | 单个权重文件 207 MB / 103 MB，超过 GitHub 单文件 100 MB 上限 | 按 [`model/README.md`](model/README.md) 下载官方预训练模型，或自己训练导出 |
-| ✅ | `mail_config.py` | 含邮箱授权码，属于个人凭据，不能公开 | 复制 `mail_config.example.py` 为 `mail_config.py`，填入发件邮箱与授权码 |
+| ✅ | `model/` 模型权重 | 单个权重 207 MB / 103 MB，超 GitHub 单文件 100 MB 上限 | 按 [`model/README.md`](model/README.md) 下载官方预训练模型，或自己训练导出 |
+| ⚠️ | `mail_config.py` | 含邮箱授权码，属个人凭据，不能公开 | 复制模板后填入发件邮箱与授权码（**不配也能跑**，只是邮件告警不可用） |
+
+**第 1 步 · 放模型**，最终目录应得到：
+
+```
+model/
+├── meter_det_model/      # 检测，PPYOLOv2，输入 608×608
+│   ├── model.pdmodel
+│   └── model.pdiparams
+└── meter_seg_model/      # 分割，DeepLabV3P，输入 512×512
+    ├── model.pdmodel
+    └── model.pdiparams
+```
+
+**第 2 步 · 配邮箱**（可选，跳过则告警功能不可用）：
 
 ```bash
-# 第 1 步：放模型，最终应得到
-#   model/meter_det_model/model.pdmodel + model.pdiparams
-#   model/meter_seg_model/model.pdmodel + model.pdiparams
-
-# 第 2 步：配邮箱（不配也能跑，只是邮件告警不可用）
 copy mail_config.example.py mail_config.py
 notepad mail_config.py
 ```
 
-`mail_config.py` 里需要填四项：
+`mail_config.py` 里填四项：
 
 ```python
-SENDER = 'your_account@qq.com'      # 发件邮箱
-AUTH_CODE = 'your_auth_code'        # 邮箱授权码，不是登录密码
+SENDER = 'your_account@qq.com'       # 发件邮箱
+AUTH_CODE = 'your_auth_code'         # 邮箱授权码，不是登录密码
 DEFAULT_TO = 'receiver@example.com'  # 默认收件人（界面里也能改）
-SMTP_HOST = 'smtp.qq.com'           # 换服务商时改
+SMTP_HOST = 'smtp.qq.com'            # 换服务商时改，如 smtp.163.com
 ```
 
 > **QQ 邮箱授权码怎么拿**：登录 QQ 邮箱 → 设置 → 账户 → 开启「POP3/SMTP 服务」→
-> 生成授权码（16 位字母）。用 QQ 登录密码去 SMTP 登录会被服务器直接拒绝。
+> 生成授权码（16 位字母）。用 QQ 登录密码做 SMTP 登录会被服务器直接拒绝。
 > 163 邮箱同理，记得把 `SMTP_HOST` 改成 `smtp.163.com`。
+
+**第 3 步 · 校验**，确认模型放对了再往下走：
+
+```bash
+python -c "import pre; pre.warmup(); print('模型加载成功')"
+```
 
 ### 4. 运行
 
